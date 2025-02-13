@@ -1,6 +1,4 @@
 using System.Diagnostics;
-using System.Drawing.Imaging;
-using System.Runtime.InteropServices;
 using TorchSharp;
 using static TorchSharp.torch;
 
@@ -15,60 +13,33 @@ namespace MPCount_TorchSharp
 
 		private void Form1_Load(object sender, EventArgs e)
 		{
-			var model = torch.jit.load(@".\Assets\model_fp16.torchscript").half().cuda();
-			model.forward(torch.rand([1, 3, 1024, 1024]).half().cuda()); // Warm Up
-			Bitmap srcBitmap = new Bitmap(@".\Assets\1.jpg");
-			int width = srcBitmap.Width;
-			int height = srcBitmap.Height;
-			BitmapData bitmapData = srcBitmap.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
-			byte[] data = new byte[bitmapData.Stride * bitmapData.Height];
-			Marshal.Copy(bitmapData.Scan0, data, 0, data.Length);
-			srcBitmap.UnlockBits(bitmapData);
+			Device device = CUDA;
+			ScalarType type = ScalarType.Float32;
 
-			float[] tensorData = new float[data.Length];
+			torchvision.io.DefaultImager = new torchvision.io.SkiaImager();
 
-			for (int c = 0; c < 3; c++)
-			{
-				for (int w = 0; w < width; w++)
-				{
-					for (int h = 0; h < height; h++)
-					{
-						tensorData[c * (width * height) + (width * h + w)] = (data[3 * width * h + 3 * w + 2 - c] / 255.0f - 0.5f) / 0.5f;
-					}
-				}
-			}
-
-			Tensor inputTensor = torch.tensor(tensorData).half().cuda();
-			inputTensor = inputTensor.view([1, 3, height, width]);
+			var model = torch.jit.load(@".\Assets\model_fp16.torchscript").to(device, type);
+			model.forward(torch.rand([1, 3, 1024, 1024]).to(type, device)); // Warm Up
 			Stopwatch stopwatch = Stopwatch.StartNew();
-			ValueTuple<Tensor, Tensor> resultTensors = (ValueTuple<Tensor, Tensor>)model.forward(inputTensor);
-
+			Tensor orgTensor = torchvision.io.read_image(@".\Assets\1.jpg").to(device);
+			Tensor inputTensor = orgTensor.to(type).unsqueeze(0) / 255.0f / 2.0f - 1.0f;
+			(Tensor, Tensor) resultTensors = ((Tensor, Tensor))(model.forward(inputTensor));
 			Tensor r1 = resultTensors.Item1;
-			//Tensor r2 = resultTensors.Item2;
 
-			float[] f = r1.@float().data<float>().ToArray();
-			int count = (int)(f.Sum() / 1000);
-			var min = f.Min();
-			var max = f.Max();
-			Tensor result = (r1 - min) / (max - min) * 255.0f;
+			int count = (int)(r1.sum() / 1000);
+			var min = r1.min();
+			var max = r1.max();
+			Tensor resultMask = (r1.squeeze(0).squeeze(0) - min) / (max - min) > 0.2f;
 
-			byte[] resultData = new byte[f.Length];
-			for (int i = 0; i < resultData.Length; i++)
-			{
-				float r = (f[i] - min) / (max - min);
-				if (r > 0.5)
-				{
-					data[3 * i + 2] = 255;
-				}
-			}
+			orgTensor[0] = (orgTensor[0] + resultMask * 255.0f).clamp(0, 255).@byte();
 
-			Bitmap predImg = new Bitmap(width, height, PixelFormat.Format24bppRgb);
-			BitmapData predBitmapData = predImg.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
-			Marshal.Copy(data, 0, predBitmapData.Scan0, data.Length);
-			predImg.UnlockBits(predBitmapData);
+			MemoryStream memoryStream = new MemoryStream();
+			torchvision.io.write_jpeg(orgTensor.cpu(), memoryStream);
+			memoryStream.Position = 0;
+			pictureBox1.Image = new Bitmap(memoryStream);
+
 			stopwatch.Stop();
-			textBox1.Text = "Time£º" + stopwatch.ElapsedMilliseconds + " ms\r\n" + "Count£º" + count;
-			pictureBox1.Image = predImg;
+			textBox1.Text = $"Count: {count}\r\nTime: {stopwatch.ElapsedMilliseconds}ms";
 
 		}
 	}
